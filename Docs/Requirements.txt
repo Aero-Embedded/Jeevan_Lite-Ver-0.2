@@ -1,0 +1,157 @@
+adc ch0 pressure sensor 0 - 70 cm of h20 raw 0v init raw_value 
+adc ch1 flow sensor -160 lit/min to 160 lit/min
+ivalue open/close
+evalue open/close
+dac blower 0 - 3.3 - 0 - 70 cm of h2o
+
+
+8 
+PIP 
+PEEP
+VT
+RR
+RT
+FIO2  AIR 20% O2 + 50%
+I
+E
+
+
+
+work
+
+presure
+calc
+1st time
+dac=0
+p_offset = 100 times divide by 100 mean value final value mv convert
+
+every 1ms:
+pressure= (p_adc_current in  mv - p_offset mv)/44.13 //cm of h2o
+
+formula:
+
+mili_volt=(adc_raw*5000)/4096;
+
+communication: _Pressure_Val
+
+adc sample cycle 480
+
+flow:
+calc
+1st time
+dac=0
+f_offset = 100 times divide by 100 mean value final value mv convert
+
+every 1ms:
+dp=( (f_adc_current in  mv - f_offset mv)/1000)*10 //kpa int mbar
+flow_q=0.1512*dp*dp*dp-3.3224*dp*dp+41.657*dp; //lpm
+volume=flow/60; //mL
+
+communication: _Flow_Val _Volume_Val
+
+gpio:
+i_valve
+e:value
+
+
+debug
+ if(_Mode_Val == 0xFF)
+		 {
+			 vTaskResume(DebugHandle);
+		 }
+i_value on
+e_value on
+communication: _Pressure_Val _Flow_Val _Volume_Val
+
+
+
+
+
+flow sensor 1ms Tr 
+
+pressure into flow
+
+F = K* Square_root(deltaP)
+
+
+mode:
+
+1 PC-CMV (AUTO) MACHINE FULL CONTROL MODE 0x01
+
+RR
+I
+E
+RT
+FIO2
+
+PIP
+PEEP
+
+RT START:
+I_VALVE - OPEN
+E_VALVE - CLOSE
+DAC++ TO REACH PIP
+
+hold
+{
+RT_END I_START:
+I_VALVE - CLOSE
+E_VALVE - CLOSE
+DAC= MIN VALUE
+}
+E_START:
+DAC= 0
+I_VALVE - CLOSE
+E_VALVE - OPEN
+UPTO PEEP REACH CLOSE E_VALVE
+
+
+2 VC-CMV (AUTO) MACHINE FULL CONTROL MODE 0x02
+
+RR
+I
+E
+RT
+FIO2
+
+VT
+PEEP
+
+NO RT TIME
+
+I_START:
+I_VALVE - OPEN
+E_VALVE - CLOSE
+DAC++
+UPTO VT
+
+DAC=0
+I_VALVE - CLOSE
+E_VALVE - OPEN
+UPTO PEEP REACH CLOSE E_VALVE
+E_END
+
+TODAY
+
+SIMPLE MOVING AVERAGE 8
+INSP AND EXP PIN SWAP
+CURRENT CYCLE NEVER CHANGE WHEN DATA RECEIVED
+VOLUME CONTROL MODE: UPTO VT 1ST TIME RUN
+REMAINS EXP OPEN AND INSP CLOSE UPTO PEEP REACH (NO HOLDING TIME)
+UART3(GIVEN BAUD RATE) SAME FUCTION AS USB CDC
+CHANGE PIO2 VARIABLE NAME TO FIO2 
+RECEIVED INTO REACHED IN VARIABLE
+
+today
+
+request disable 2ms monitor data
+ads1115 16bit adc - rtos only flow sensor  (flow sensor adc pin -> pwm pin)
+pwm e_value gpio -> pwm or  0% or 100% : freq 1kHz 100% wait 10ms delay 60%
+blower on- GPIOE->ODR|=(1<<5); and off-GPIOE->ODR&=(~(1<<5)); 
+
+offset:
+off-GPIOE->ODR&=(~(1<<5));
+dac -> 0
+e_valve - close
+delay (2000)
+adc offset

@@ -1,0 +1,1258 @@
+/* USER CODE BEGIN Header */
+/**
+  ******************************************************************************
+  * File Name          : freertos.c
+  * Description        : Code for freertos applications
+  ******************************************************************************
+  * @attention
+  *
+  * <h2><center>&copy; Copyright (c) 2021 STMicroelectronics.
+  * All rights reserved.</center></h2>
+  *
+  * This software component is licensed by ST under Ultimate Liberty license
+  * SLA0044, the "License"; You may not use this file except in compliance with
+  * the License. You may obtain a copy of the License at:
+  *                             www.st.com/SLA0044
+  *
+  ******************************************************************************
+  */
+/* USER CODE END Header */
+
+/* Includes ------------------------------------------------------------------*/
+#include "FreeRTOS.h"
+#include "task.h"
+#include "main.h"
+#include "cmsis_os.h"
+
+/* Private includes ----------------------------------------------------------*/
+/* USER CODE BEGIN Includes */
+#include "task.h"
+#include "timers.h"
+#include "queue.h"
+#include "semphr.h"
+#include "event_groups.h"
+#include "usbd_cdc_if.h"
+#include "stdlib.h"
+#include "string.h"
+#include "adc.h"
+#include "dma.h"
+#include "dac.h"
+#include "ventilator_types.h"
+#include "Venitilator_Cfg.h"
+#include "Ventilator_Calc.h"
+#include "math.h"
+#include "stdio.h"
+#include "Pressure_Calculation.h"
+#include "Ventilator_Util.h"
+#include "arm_math.h"
+#include "usart.h"
+/* USER CODE END Includes */
+
+/* Private typedef -----------------------------------------------------------*/
+/* USER CODE BEGIN PTD */
+
+/* USER CODE END PTD */
+
+/* Private define ------------------------------------------------------------*/
+/* USER CODE BEGIN PD */
+WaveFormState _CurrentWaveFormState = NoWaveFormState ;
+ComputationState _CurrentComputationState = NoComputeState ;
+ADCOperationState _CurrentADCOperationState = CalibrationState ;
+CurrentMode _CurrentMode = NoMode, _RequestedMode = NoMode ;
+/* USER CODE END PD */
+
+/* Private macro -------------------------------------------------------------*/
+/* USER CODE BEGIN PM */
+
+/* USER CODE END PM */
+
+/* Private variables ---------------------------------------------------------*/
+/* USER CODE BEGIN Variables */
+uint32_t RT_Wave = 0 , I_Wave = 0, E_Wave = 0 , RR_Value = 0 , RTI_Wave = 0 ;
+uint32_t _Req_RT_Wave = 1000 , _Req_I_Wave = 1250, _Req_E_Wave = 3750 , _Req_RR_Value = 12 , _Req_RTI_Wave = 0 ;
+uint8_t  _Received_PIP_Val =0 , _Received_PEEP_Val = 0 ,_Received_VT_Val = 0 ;
+uint8_t _PIP_Val = 0 , _PEEP_Val = 0 ,  _Mode_Val =0 , _PIO2_Val = 0  ;
+uint16_t _VT_Val= 0 ;
+uint8_t _TX_DEBUG_DATA_BUF[3] ;
+uint8_t _TX_DATA_BUF[6] ;
+uint16_t _DAC_Val = 0 ;
+uint16_t _AVG_Pressure,_AVG_Flow ;
+uint16_t _ADC_CHANNEL0[4096],_ADC_CHANNEL1[4096] ;
+uint16_t _DAC_VAL0 , _DAC_VAL1 ;
+uint8_t _MODE_DATA_SWITCH_FLAG = pdFALSE ;
+
+/*PIP & PEEP Reach  Flag*/
+uint8_t _PIP_REACHED_FLAG = pdFALSE , _PEEP_REACHED_FLAG = pdFALSE ;_VT_REACH_FLAG =pdFALSE ;
+
+long _ADC_SampleCount ;
+float _Adc_Channel0 = 0 ,_Adc_Channel1 = 0 ;
+
+
+uint8_t TransmitFlag = 0 ;
+
+uint16_t _OldPressure_Val,_OldFlow_Val ;
+
+
+SET_PARAM_CMD_PACKET *_RX_PARAM_PKT ;
+SET_CYCLIC_PACKET _CYCLIC_TRANSMIT_PKT ;
+SET_MONITORING_PACKET _MONITORING_TRANSMIT_PKT ;
+DATA_REQUEST_PACKET _DATA_REQ_PKT ;
+
+__attribute__((section(".ccmram")))
+SENSOR_DATA_BANK _SENSOR_DATA_BANK_CCM ;
+
+uint16_t _BUFFER_INDEX = 0 ;
+
+/* USER CODE END Variables */
+/* Definitions for defaultTask */
+osThreadId_t defaultTaskHandle;
+const osThreadAttr_t defaultTask_attributes = {
+  .name = "defaultTask",
+  .stack_size = 128 * 4,
+  .priority = (osPriority_t) osPriorityNormal,
+};
+/* Definitions for PulseGenerator */
+osThreadId_t PulseGeneratorHandle;
+const osThreadAttr_t PulseGenerator_attributes = {
+  .name = "PulseGenerator",
+  .stack_size = 128 * 4,
+  .priority = (osPriority_t) osPriorityLow,
+};
+/* Definitions for CMD_Process_Tas */
+osThreadId_t CMD_Process_TasHandle;
+const osThreadAttr_t CMD_Process_Tas_attributes = {
+  .name = "CMD_Process_Tas",
+  .stack_size = 128 * 4,
+  .priority = (osPriority_t) osPriorityLow,
+};
+/* Definitions for TransmitTask */
+osThreadId_t TransmitTaskHandle;
+const osThreadAttr_t TransmitTask_attributes = {
+  .name = "TransmitTask",
+  .stack_size = 128 * 4,
+  .priority = (osPriority_t) osPriorityLow,
+};
+/* Definitions for DataComputation */
+osThreadId_t DataComputationHandle;
+const osThreadAttr_t DataComputation_attributes = {
+  .name = "DataComputation",
+  .stack_size = 128 * 4,
+  .priority = (osPriority_t) osPriorityLow,
+};
+/* Definitions for ADC_Conversion */
+osThreadId_t ADC_ConversionHandle;
+const osThreadAttr_t ADC_Conversion_attributes = {
+  .name = "ADC_Conversion",
+  .stack_size = 128 * 4,
+  .priority = (osPriority_t) osPriorityNormal,
+};
+/* Definitions for Set_DAC_Value */
+osThreadId_t Set_DAC_ValueHandle;
+const osThreadAttr_t Set_DAC_Value_attributes = {
+  .name = "Set_DAC_Value",
+  .stack_size = 128 * 4,
+  .priority = (osPriority_t) osPriorityLow,
+};
+/* Definitions for CMVPC */
+osThreadId_t CMVPCHandle;
+const osThreadAttr_t CMVPC_attributes = {
+  .name = "CMVPC",
+  .stack_size = 128 * 4,
+  .priority = (osPriority_t) osPriorityLow,
+};
+/* Definitions for CMVVC */
+osThreadId_t CMVVCHandle;
+const osThreadAttr_t CMVVC_attributes = {
+  .name = "CMVVC",
+  .stack_size = 128 * 4,
+  .priority = (osPriority_t) osPriorityLow,
+};
+/* Definitions for SIMVPC */
+osThreadId_t SIMVPCHandle;
+const osThreadAttr_t SIMVPC_attributes = {
+  .name = "SIMVPC",
+  .stack_size = 128 * 4,
+  .priority = (osPriority_t) osPriorityLow,
+};
+/* Definitions for SIMVVC */
+osThreadId_t SIMVVCHandle;
+const osThreadAttr_t SIMVVC_attributes = {
+  .name = "SIMVVC",
+  .stack_size = 128 * 4,
+  .priority = (osPriority_t) osPriorityLow,
+};
+/* Definitions for PS_V */
+osThreadId_t PS_VHandle;
+const osThreadAttr_t PS_V_attributes = {
+  .name = "PS_V",
+  .stack_size = 128 * 4,
+  .priority = (osPriority_t) osPriorityLow,
+};
+/* Definitions for cPAP_V */
+osThreadId_t cPAP_VHandle;
+const osThreadAttr_t cPAP_V_attributes = {
+  .name = "cPAP_V",
+  .stack_size = 128 * 4,
+  .priority = (osPriority_t) osPriorityLow,
+};
+/* Definitions for BiPAP_V */
+osThreadId_t BiPAP_VHandle;
+const osThreadAttr_t BiPAP_V_attributes = {
+  .name = "BiPAP_V",
+  .stack_size = 128 * 4,
+  .priority = (osPriority_t) osPriorityLow,
+};
+/* Definitions for APR_VC */
+osThreadId_t APR_VCHandle;
+const osThreadAttr_t APR_VC_attributes = {
+  .name = "APR_VC",
+  .stack_size = 128 * 4,
+  .priority = (osPriority_t) osPriorityLow,
+};
+/* Definitions for Debug */
+osThreadId_t DebugHandle;
+const osThreadAttr_t Debug_attributes = {
+  .name = "Debug",
+  .stack_size = 128 * 4,
+  .priority = (osPriority_t) osPriorityLow,
+};
+/* Definitions for UART_CMD_Handle */
+osThreadId_t UART_CMD_HandleHandle;
+const osThreadAttr_t UART_CMD_Handle_attributes = {
+  .name = "UART_CMD_Handle",
+  .stack_size = 128 * 4,
+  .priority = (osPriority_t) osPriorityLow,
+};
+/* Definitions for Receive_Buffer */
+osSemaphoreId_t Receive_BufferHandle;
+const osSemaphoreAttr_t Receive_Buffer_attributes = {
+  .name = "Receive_Buffer"
+};
+/* Definitions for ADC_Buffer */
+osSemaphoreId_t ADC_BufferHandle;
+const osSemaphoreAttr_t ADC_Buffer_attributes = {
+  .name = "ADC_Buffer"
+};
+/* Definitions for UART_RX_Buffer */
+osSemaphoreId_t UART_RX_BufferHandle;
+const osSemaphoreAttr_t UART_RX_Buffer_attributes = {
+  .name = "UART_RX_Buffer"
+};
+
+/* Private function prototypes -----------------------------------------------*/
+/* USER CODE BEGIN FunctionPrototypes */
+
+/* USER CODE END FunctionPrototypes */
+
+void StartDefaultTask(void *argument);
+void PulseGeneratorTask(void *argument);
+void CMD_Handler(void *argument);
+void TransmitDataTask(void *argument);
+void DataComputation_Task(void *argument);
+void ADC_Conversion_Task(void *argument);
+void Set_DAC_Value_Task(void *argument);
+void CMVPC_Mode_Task(void *argument);
+void CMVVC_Mode_Task(void *argument);
+void SIMVPC_Mode_Task(void *argument);
+void SIMVVC_Mode_Task(void *argument);
+void PS_V_Mode_Task(void *argument);
+void cPAP_V_Mode_Task(void *argument);
+void BiPAP_V_Mode_Task(void *argument);
+void APR_VC_Mode_Task(void *argument);
+void Debug_Task(void *argument);
+void UART_CMD_Handler_Task(void *argument);
+
+extern void MX_USB_DEVICE_Init(void);
+void MX_FREERTOS_Init(void); /* (MISRA C 2004 rule 8.1) */
+
+/**
+  * @brief  FreeRTOS initialization
+  * @param  None
+  * @retval None
+  */
+void MX_FREERTOS_Init(void) {
+  /* USER CODE BEGIN Init */
+
+  /* USER CODE END Init */
+
+  /* USER CODE BEGIN RTOS_MUTEX */
+  /* add mutexes, ... */
+  /* USER CODE END RTOS_MUTEX */
+
+  /* Create the semaphores(s) */
+  /* creation of Receive_Buffer */
+  Receive_BufferHandle = osSemaphoreNew(1, 1, &Receive_Buffer_attributes);
+
+  /* creation of ADC_Buffer */
+  ADC_BufferHandle = osSemaphoreNew(1, 1, &ADC_Buffer_attributes);
+
+  /* creation of UART_RX_Buffer */
+  UART_RX_BufferHandle = osSemaphoreNew(1, 1, &UART_RX_Buffer_attributes);
+
+  /* USER CODE BEGIN RTOS_SEMAPHORES */
+  /* add semaphores, ... */
+  /* USER CODE END RTOS_SEMAPHORES */
+
+  /* USER CODE BEGIN RTOS_TIMERS */
+  /* start timers, add new ones, ... */
+  /* USER CODE END RTOS_TIMERS */
+
+  /* USER CODE BEGIN RTOS_QUEUES */
+  /* add queues, ... */
+  /* USER CODE END RTOS_QUEUES */
+
+  /* Create the thread(s) */
+  /* creation of defaultTask */
+  defaultTaskHandle = osThreadNew(StartDefaultTask, NULL, &defaultTask_attributes);
+
+  /* creation of PulseGenerator */
+  PulseGeneratorHandle = osThreadNew(PulseGeneratorTask, NULL, &PulseGenerator_attributes);
+
+  /* creation of CMD_Process_Tas */
+  CMD_Process_TasHandle = osThreadNew(CMD_Handler, NULL, &CMD_Process_Tas_attributes);
+
+  /* creation of TransmitTask */
+  TransmitTaskHandle = osThreadNew(TransmitDataTask, NULL, &TransmitTask_attributes);
+
+  /* creation of DataComputation */
+  DataComputationHandle = osThreadNew(DataComputation_Task, NULL, &DataComputation_attributes);
+
+  /* creation of ADC_Conversion */
+  ADC_ConversionHandle = osThreadNew(ADC_Conversion_Task, NULL, &ADC_Conversion_attributes);
+
+  /* creation of Set_DAC_Value */
+  Set_DAC_ValueHandle = osThreadNew(Set_DAC_Value_Task, NULL, &Set_DAC_Value_attributes);
+
+  /* creation of CMVPC */
+  CMVPCHandle = osThreadNew(CMVPC_Mode_Task, NULL, &CMVPC_attributes);
+
+  /* creation of CMVVC */
+  CMVVCHandle = osThreadNew(CMVVC_Mode_Task, NULL, &CMVVC_attributes);
+
+  /* creation of SIMVPC */
+  SIMVPCHandle = osThreadNew(SIMVPC_Mode_Task, NULL, &SIMVPC_attributes);
+
+  /* creation of SIMVVC */
+  SIMVVCHandle = osThreadNew(SIMVVC_Mode_Task, NULL, &SIMVVC_attributes);
+
+  /* creation of PS_V */
+  PS_VHandle = osThreadNew(PS_V_Mode_Task, NULL, &PS_V_attributes);
+
+  /* creation of cPAP_V */
+  cPAP_VHandle = osThreadNew(cPAP_V_Mode_Task, NULL, &cPAP_V_attributes);
+
+  /* creation of BiPAP_V */
+  BiPAP_VHandle = osThreadNew(BiPAP_V_Mode_Task, NULL, &BiPAP_V_attributes);
+
+  /* creation of APR_VC */
+  APR_VCHandle = osThreadNew(APR_VC_Mode_Task, NULL, &APR_VC_attributes);
+
+  /* creation of Debug */
+  DebugHandle = osThreadNew(Debug_Task, NULL, &Debug_attributes);
+
+  /* creation of UART_CMD_Handle */
+  UART_CMD_HandleHandle = osThreadNew(UART_CMD_Handler_Task, NULL, &UART_CMD_Handle_attributes);
+
+  /* USER CODE BEGIN RTOS_THREADS */
+  /* add threads, ... */
+  /* USER CODE END RTOS_THREADS */
+
+  /* USER CODE BEGIN RTOS_EVENTS */
+  /* add events, ... */
+  /* USER CODE END RTOS_EVENTS */
+
+}
+
+/* USER CODE BEGIN Header_StartDefaultTask */
+/**
+  * @brief  Function implementing the defaultTask thread.
+  * @param  argument: Not used
+  * @retval None
+  */
+/* USER CODE END Header_StartDefaultTask */
+void StartDefaultTask(void *argument)
+{
+  /* init code for USB_DEVICE */
+  MX_USB_DEVICE_Init();
+  /* USER CODE BEGIN StartDefaultTask */
+  vTaskSuspend(CMVPCHandle);
+  vTaskSuspend(CMVVCHandle);
+  vTaskSuspend(SIMVPCHandle);
+  vTaskSuspend(SIMVVCHandle);
+  vTaskSuspend(PS_VHandle);
+  vTaskSuspend(cPAP_VHandle);
+  vTaskSuspend(BiPAP_VHandle);
+  vTaskSuspend(APR_VCHandle);
+  vTaskSuspend(Set_DAC_ValueHandle);
+  vTaskSuspend(TransmitTaskHandle);
+  vTaskSuspend(DebugHandle);
+  _SENSOR_DATA_BANK_CCM._ACTIVE_BANK = 1 ;
+  HAL_DAC_SetValue(&hdac, DAC_CHANNEL_1,DAC_ALIGN_12B_R, 0) ;
+  /* Infinite loop */
+  for(;;)
+  {
+	  osDelay(1);
+  }
+  /* USER CODE END StartDefaultTask */
+}
+
+/* USER CODE BEGIN Header_PulseGeneratorTask */
+/**
+* @brief Function implementing the PulseGenerator thread.
+* @param argument: Not used
+* @retval None
+*/
+/* USER CODE END Header_PulseGeneratorTask */
+void PulseGeneratorTask(void *argument)
+{
+  /* USER CODE BEGIN PulseGeneratorTask */
+  TickType_t xDelay = 0 ; // portTICK_PERIOD_MS
+  /* Infinite loop */
+  for(;;)
+  {
+	  switch (_CurrentWaveFormState) {
+		case Generate_RT_Wave:
+
+			HAL_GPIO_WritePin(Wave_GPIO_Port, Wave_Pin, GPIO_PIN_RESET);
+			_CurrentWaveFormState = Generate_I_Wave ;
+			xDelay = RT_Wave ;
+			_CurrentComputationState = Compute_RT_Wave ;
+			vTaskDelay( xDelay );
+			break;
+		case Generate_I_Wave:
+			HAL_GPIO_WritePin(Wave_GPIO_Port, Wave_Pin, GPIO_PIN_SET);
+			_CurrentWaveFormState = Generate_E_Wave ;
+			_CurrentComputationState = Compute_I_Wave ;
+			xDelay = (RTI_Wave) ;
+			vTaskDelay( xDelay );
+			break;
+		case Generate_E_Wave:
+			HAL_GPIO_WritePin(Wave_GPIO_Port, Wave_Pin, GPIO_PIN_RESET);
+			xDelay = (E_Wave) ;
+			if(_MODE_DATA_SWITCH_FLAG == pdTRUE )
+			{
+				if(_CurrentMode !=NoMode){
+				RT_Wave = _Req_RT_Wave ;
+				I_Wave = _Req_I_Wave ;
+				E_Wave = _Req_E_Wave ;
+				RTI_Wave = _Req_RTI_Wave ;
+				}
+				if(_CurrentMode != _RequestedMode  && _RequestedMode == PCCMV)
+				{
+					vTaskResume(CMVPCHandle);
+					vTaskSuspend(CMVVCHandle);
+					_CurrentMode = PCCMV ;
+				}
+				else if(_CurrentMode != _RequestedMode  && _RequestedMode == VCCMV)
+				{
+    				vTaskSuspend(CMVPCHandle);
+					vTaskResume(CMVVCHandle);
+					_CurrentMode = VCCMV ;
+				}
+				else
+				{
+
+				}
+
+				_MODE_DATA_SWITCH_FLAG = pdFALSE ;
+			}
+
+			if(_CurrentMode == PCCMV)
+			{
+				_CurrentWaveFormState = Generate_RT_Wave ;
+				_CurrentComputationState = Compute_E_Wave ;
+			}
+			else if(_CurrentMode == VCCMV)
+			{
+				_CurrentWaveFormState = Generate_I_Wave ;
+				_CurrentComputationState = Compute_E_Wave ;
+			}
+
+			_MONITORING_TRANSMIT_PKT._header         = 0x504d ;
+			_MONITORING_TRANSMIT_PKT._length         = sizeof(_MONITORING_TRANSMIT_PKT)-4 ;
+			//_MONITORING_TRANSMIT_PKT._R_PIP          = 0 ;
+			//_MONITORING_TRANSMIT_PKT._R_PEEP         = 0 ;
+			//_MONITORING_TRANSMIT_PKT._R_VTI          = 0 ;
+			//_MONITORING_TRANSMIT_PKT._R_VTE          = 0 ;
+			_MONITORING_TRANSMIT_PKT._R_TI           = 0 ;
+			_MONITORING_TRANSMIT_PKT._R_TE           = 0 ;
+			_MONITORING_TRANSMIT_PKT._R_FIO2         = 0 ;
+			_MONITORING_TRANSMIT_PKT._RiseTime       = 0 ;
+			_MONITORING_TRANSMIT_PKT._R_P_PLATEAU    = 0 ;
+			_MONITORING_TRANSMIT_PKT._CRC8           = chksum8(&_MONITORING_TRANSMIT_PKT._R_PIP,_MONITORING_TRANSMIT_PKT._length);
+
+			vTaskDelay( xDelay );
+
+			break;
+		case NoWaveFormState:
+			break;
+		default:
+			break;
+
+	}
+  }
+  /* USER CODE END PulseGeneratorTask */
+}
+
+/* USER CODE BEGIN Header_CMD_Handler */
+/**
+* @brief Function implementing the CMD_Process_Tas thread.
+* @param argument: Not used
+* @retval None
+*/
+/* USER CODE END Header_CMD_Handler */
+void CMD_Handler(void *argument)
+{
+  /* USER CODE BEGIN CMD_Handler */
+	xSemaphoreTake(Receive_BufferHandle, portMAX_DELAY);
+	uint8_t _RX_CRC8 ;
+	/* Infinite loop */
+	for(;;)
+	{
+		/* Lock Task here until unlocked by ISR*/
+		xSemaphoreTake(Receive_BufferHandle, portMAX_DELAY);
+
+		//Order of Reception RR_Value/I_Wave/E_Wave/RT_Wave/_PIP_Val/_PEEP_Val/_VT_Val/_Mode_Val/_PIO2_Val
+
+		_RX_CRC8 = chksum8(&received_data[3],((SET_PARAM_CMD_PACKET*) (received_data))->_length);
+
+		if(_RX_CRC8 == ((SET_PARAM_CMD_PACKET*) (received_data))->_CRC8)
+		{
+			if((0x504D == ((SET_PARAM_CMD_PACKET*) (received_data))->_header) && (0x01 == ((DATA_REQUEST_PACKET*) (received_data))->_data))
+			{
+				_CYCLIC_TRANSMIT_PKT._header          = 0x5052 ;
+				_CYCLIC_TRANSMIT_PKT._length          = sizeof(_CYCLIC_TRANSMIT_PKT)-4 ;
+				_CYCLIC_TRANSMIT_PKT._Pressure_Val    = _Pressure_Val ;
+				_CYCLIC_TRANSMIT_PKT._Flow_Val        = _Flow_Val ;
+				_CYCLIC_TRANSMIT_PKT._Volume_Val      = _Volume_Val ;
+				_CYCLIC_TRANSMIT_PKT._CRC8            = chksum8(&_CYCLIC_TRANSMIT_PKT._Pressure_Val,_CYCLIC_TRANSMIT_PKT._length); ;
+
+				CDC_Transmit_FS((uint8_t*)&_CYCLIC_TRANSMIT_PKT,sizeof(_CYCLIC_TRANSMIT_PKT)) ;
+
+				if(TransmitFlag == 0)
+				{
+					HAL_UART_Transmit_IT(&huart3,(uint8_t*)&_CYCLIC_TRANSMIT_PKT,sizeof(_CYCLIC_TRANSMIT_PKT));
+					TransmitFlag = 1 ;
+				}
+			}
+			else if((0x5052 == ((SET_PARAM_CMD_PACKET*) (received_data))->_header) && (0x02 == ((DATA_REQUEST_PACKET*) (received_data))->_data))
+			{
+				 CDC_Transmit_FS((uint8_t*)&_MONITORING_TRANSMIT_PKT,sizeof(_MONITORING_TRANSMIT_PKT)-1) ;
+				 if(TransmitFlag == 0)
+				 {
+					   HAL_UART_Transmit_IT(&huart3,(uint8_t*)&_MONITORING_TRANSMIT_PKT,sizeof(_MONITORING_TRANSMIT_PKT));
+					   TransmitFlag = 1 ;
+				 }
+			}
+			else
+			{
+				COMMAND_HANDLER((SET_PARAM_CMD_PACKET*) (received_data));
+			}
+		}
+
+
+	}
+  /* USER CODE END CMD_Handler */
+}
+
+/* USER CODE BEGIN Header_TransmitDataTask */
+/**
+* @brief Function implementing the TransmitTask thread.
+* @param argument: Not used
+* @retval None
+*/
+/* USER CODE END Header_TransmitDataTask */
+void TransmitDataTask(void *argument)
+{
+  /* USER CODE BEGIN TransmitDataTask */
+	TickType_t xDelay = 1 ; // portTICK_PERIOD_MS
+	/* Infinite loop */
+	for(;;)
+	{
+		_CYCLIC_TRANSMIT_PKT._header          = 0x5052 ;
+		_CYCLIC_TRANSMIT_PKT._length          = sizeof(_CYCLIC_TRANSMIT_PKT)-4 ;
+		_CYCLIC_TRANSMIT_PKT._Pressure_Val    = _Pressure_Val ;
+		_CYCLIC_TRANSMIT_PKT._Flow_Val        = _Flow_Val ;
+		_CYCLIC_TRANSMIT_PKT._Volume_Val      = _Volume_Val ;
+		_CYCLIC_TRANSMIT_PKT._CRC8            = chksum8(&_CYCLIC_TRANSMIT_PKT._Pressure_Val,_CYCLIC_TRANSMIT_PKT._length); ;
+
+		CDC_Transmit_FS((uint8_t*)&_CYCLIC_TRANSMIT_PKT,sizeof(_CYCLIC_TRANSMIT_PKT)) ;
+
+		if(TransmitFlag == 0)
+		{
+			HAL_UART_Transmit_IT(&huart3,(uint8_t*)&_CYCLIC_TRANSMIT_PKT,sizeof(_CYCLIC_TRANSMIT_PKT));
+			TransmitFlag = 1 ;
+		}
+		vTaskDelay( xDelay );
+	}
+  /* USER CODE END TransmitDataTask */
+}
+
+/* USER CODE BEGIN Header_DataComputation_Task */
+/**
+* @brief Function implementing the DataComputation thread.
+* @param argument: Not used
+* @retval None
+*/
+/* USER CODE END Header_DataComputation_Task */
+void DataComputation_Task(void *argument)
+{
+	/* USER CODE BEGIN DataComputation_Task */
+	TickType_t xDelay = 1 ; // portTICK_PERIOD_MS
+	/* Infinite loop */
+	for(;;)
+	{
+		if(_CurrentMode != NoMode)
+		{
+
+			if(_SENSOR_DATA_BANK_CCM._ACTIVE_BANK == 1 && _BUFFER_INDEX < (I_Wave+E_Wave) )
+			{
+				_SENSOR_DATA_BANK_CCM._HISTORY_BANK1._FLOW_VAL_BUF[_BUFFER_INDEX] = _Flow_Val ;
+				_SENSOR_DATA_BANK_CCM._HISTORY_BANK1._PRESSURE_VAL_BUF[_BUFFER_INDEX] = _Pressure_Val ;
+				_SENSOR_DATA_BANK_CCM._HISTORY_BANK1._VOLUME_VAL_BUF[_BUFFER_INDEX] = _VT_Val ;
+				_BUFFER_INDEX++ ;
+			}
+			else
+			{
+				/*At least one Bank is full set the flag */
+				_SENSOR_DATA_BANK_CCM._HISTORY_AVAILBLE = 1 ;
+
+				if(_SENSOR_DATA_BANK_CCM._ACTIVE_BANK == 1 )
+				{
+					_BUFFER_INDEX = 0 ;
+					_SENSOR_DATA_BANK_CCM._ACTIVE_BANK = 2 ;
+					_SENSOR_DATA_BANK_CCM._HISTORY_BANK2._FLOW_VAL_BUF[_BUFFER_INDEX] = _Flow_Val ;
+					_SENSOR_DATA_BANK_CCM._HISTORY_BANK2._PRESSURE_VAL_BUF[_BUFFER_INDEX] = _Pressure_Val ;
+					_SENSOR_DATA_BANK_CCM._HISTORY_BANK2._VOLUME_VAL_BUF[_BUFFER_INDEX] = _VT_Val ;
+					_BUFFER_INDEX++ ;
+				}
+				else
+				{
+					if(_SENSOR_DATA_BANK_CCM._ACTIVE_BANK == 2 && _BUFFER_INDEX < (I_Wave+E_Wave))
+					{
+						_SENSOR_DATA_BANK_CCM._HISTORY_BANK2._FLOW_VAL_BUF[_BUFFER_INDEX] = _Flow_Val ;
+						_SENSOR_DATA_BANK_CCM._HISTORY_BANK2._PRESSURE_VAL_BUF[_BUFFER_INDEX] = _Pressure_Val ;
+						_SENSOR_DATA_BANK_CCM._HISTORY_BANK2._VOLUME_VAL_BUF[_BUFFER_INDEX] = _VT_Val ;
+						_BUFFER_INDEX++ ;
+					}
+					else
+					{
+						_BUFFER_INDEX = 0 ;
+						_SENSOR_DATA_BANK_CCM._ACTIVE_BANK = 1 ;
+						_SENSOR_DATA_BANK_CCM._HISTORY_BANK1._FLOW_VAL_BUF[_BUFFER_INDEX] = _Flow_Val ;
+						_SENSOR_DATA_BANK_CCM._HISTORY_BANK1._PRESSURE_VAL_BUF[_BUFFER_INDEX] = _Pressure_Val ;
+						_SENSOR_DATA_BANK_CCM._HISTORY_BANK1._VOLUME_VAL_BUF[_BUFFER_INDEX] = _VT_Val ;
+						_BUFFER_INDEX++ ;
+					}
+				}
+
+			}
+		}
+		vTaskDelay( xDelay );
+	}
+	/* USER CODE END DataComputation_Task */
+}
+
+/* USER CODE BEGIN Header_ADC_Conversion_Task */
+/**
+* @brief Function implementing the ADC_Conversion thread.
+* @param argument: Not used
+* @retval None
+*/
+/* USER CODE END Header_ADC_Conversion_Task */
+void ADC_Conversion_Task(void *argument)
+{
+  /* USER CODE BEGIN ADC_Conversion_Task */
+	xSemaphoreTake(ADC_BufferHandle, portMAX_DELAY);
+	HAL_ADC_Start_DMA(&hadc1, (uint32_t*)ADC_RESULT_BUF, 2);
+	/* Infinite loop */
+	for(;;)
+	{
+		uint8_t _retVal = E_NOK ;
+		xSemaphoreTake(ADC_BufferHandle, portMAX_DELAY);
+		switch (_CurrentADCOperationState) {
+		case CalibrationState:
+			/* Close the Inspiratory Valve */
+			InspValve_Close() ;
+
+			/* Perform Calibration process for PRESSURE and FLOW Sensor */
+			_retVal = Calibration_Process();
+
+			if(_retVal == E_PENDING)
+			{
+
+			}
+			else if(_retVal == E_OK)
+			{
+				_CurrentADCOperationState = ConversationState ;
+			}
+			else
+			{
+				/*Ideally Should not Reach this State */
+			}
+
+			break;
+		case ConversationState:
+
+			_AVG_Pressure = getAvgMilliVot(_ADC_CHANNEL0, _ADC_SampleCount) ;
+			_AVG_Flow = getAvgMilliVot(_ADC_CHANNEL1, _ADC_SampleCount) ;
+
+			/* if  Moving Average is not needed then comment next four lines of code */
+			_AVG_Pressure = ((_AVG_Pressure - _OldPressure_Val)/8 )+_OldPressure_Val;
+			_OldPressure_Val = _AVG_Pressure ;
+			_AVG_Flow = ((_AVG_Flow - _OldFlow_Val)/8 )+_OldFlow_Val;
+			_OldFlow_Val = _AVG_Flow ;
+
+			_Pressure_Val = _CONVERT_PRESStoCMH2O (_AVG_Pressure,_Pressure_Offset) ;
+			_Differential_Pressure = _CONVERT_KPAtoBar(_AVG_Flow,_Flow_Offset) ;
+			_Flow_Val = _CONVERT_dPAtoFlow(_Differential_Pressure) ;
+			_Volume_Val = _Flow_Val /60 ; //mL
+			_Total_Volume=_Total_Volume+_Volume_Val;
+
+			_ADC_SampleCount = 0 ;
+
+			break;
+		default:
+			break;
+		}
+		/* Conversion TIME needed for Sensor 1ms */
+		vTaskDelay(SENSOR_CONVERSION_TIME);
+	}
+  /* USER CODE END ADC_Conversion_Task */
+}
+
+/* USER CODE BEGIN Header_Set_DAC_Value_Task */
+/**
+* @brief Function implementing the Set_DAC_Value thread.
+* @param argument: Not used
+* @retval None
+*/
+/* USER CODE END Header_Set_DAC_Value_Task */
+void Set_DAC_Value_Task(void *argument)
+{
+  /* USER CODE BEGIN Set_DAC_Value_Task */
+  TickType_t xDelay = 100 ; // portTICK_PERIOD_MS
+  /* Infinite loop */
+  for(;;)
+  {
+		if(_DAC_Val < 4096 )
+		{
+			HAL_DAC_SetValue(&hdac, DAC_CHANNEL_1,DAC_ALIGN_12B_R, _DAC_Val) ;
+			HAL_DAC_SetValue(&hdac, DAC_CHANNEL_2,DAC_ALIGN_12B_R, _DAC_Val) ;
+			_DAC_Val++;
+		}
+		else
+			_DAC_Val = 0 ;
+
+		vTaskDelay( xDelay );
+  }
+  /* USER CODE END Set_DAC_Value_Task */
+}
+
+/* USER CODE BEGIN Header_CMVPC_Mode_Task */
+/**
+* @brief Function implementing the CMVPC thread.
+* @param argument: Not used
+* @retval None
+*/
+/* USER CODE END Header_CMVPC_Mode_Task */
+void CMVPC_Mode_Task(void *argument)
+{
+  /* USER CODE BEGIN CMVPC_Mode_Task */
+  /* Infinite loop */
+	for(;;)
+	  {
+		  switch (_CurrentComputationState) {
+			case Compute_RT_Wave:
+				_Total_Volume=0;
+				_PEEP_REACHED_FLAG = pdFALSE ;
+				/* Set DAC untill received PIP value is Reached */
+				if(_Pressure_Val < _PIP_Val && _PIP_REACHED_FLAG == pdFALSE)
+				{
+					InspValve_Open();
+					ExpValve_Close();
+					if(_PIP_Val>=60)
+					_PIP_Val=60;
+
+					_DAC_VAL0=(_PIP_Val/60.00)*4095.00;
+					HAL_DAC_SetValue(&hdac, DAC_CHANNEL_1,DAC_ALIGN_12B_R, _DAC_VAL0) ;
+					HAL_DAC_SetValue(&hdac, DAC_CHANNEL_2,DAC_ALIGN_12B_R, _DAC_VAL0) ;
+					/*_DAC_VAL0=4000 ;
+					if(_DAC_VAL0>=400)
+					{
+						_DAC_VAL0=4095;
+					}*/
+
+					_MONITORING_TRANSMIT_PKT._R_PIP = _Pressure_Val ;
+
+				}
+				else
+				{
+					_PIP_REACHED_FLAG = pdTRUE ;
+					InspValve_Close();
+					ExpValve_Close();
+					_DAC_VAL0 = 0 ;
+					HAL_DAC_SetValue(&hdac, DAC_CHANNEL_1,DAC_ALIGN_12B_R, _DAC_VAL0) ;
+					HAL_DAC_SetValue(&hdac, DAC_CHANNEL_2,DAC_ALIGN_12B_R, _DAC_VAL0) ;
+				}
+				break;
+			case Compute_I_Wave:
+
+				if(_Pressure_Val < _PIP_Val && _PIP_REACHED_FLAG == pdFALSE)
+				{
+					InspValve_Open();
+					ExpValve_Close();
+					HAL_DAC_SetValue(&hdac, DAC_CHANNEL_1,DAC_ALIGN_12B_R, _DAC_VAL0) ;
+					HAL_DAC_SetValue(&hdac, DAC_CHANNEL_2,DAC_ALIGN_12B_R, _DAC_VAL0) ;
+					_DAC_VAL0++ ;
+					_MONITORING_TRANSMIT_PKT._R_PIP = _Pressure_Val ;
+
+				}
+				else if (_PIP_REACHED_FLAG == pdTRUE)
+				{
+
+					InspValve_Close();
+					ExpValve_Close();
+				}
+				else
+				{
+					_PIP_REACHED_FLAG = pdTRUE ;
+					InspValve_Close();
+					ExpValve_Close();
+					_DAC_VAL0 = 0 ;
+					HAL_DAC_SetValue(&hdac, DAC_CHANNEL_1,DAC_ALIGN_12B_R, _DAC_VAL0) ;
+					HAL_DAC_SetValue(&hdac, DAC_CHANNEL_2,DAC_ALIGN_12B_R, _DAC_VAL0) ;
+				}
+
+				/* Set Minimum DAC value */
+				//_DAC_VAL0 = 1045 ;
+				//HAL_DAC_SetValue(&hdac, DAC_CHANNEL_2,DAC_ALIGN_12B_R, _DAC_VAL0) ;
+
+				break;
+			case Compute_E_Wave:
+				_PIP_REACHED_FLAG = pdFALSE ;
+				_DAC_VAL0 = 0 ;
+				if(_Pressure_Val >= _PEEP_Val && _PEEP_REACHED_FLAG == pdFALSE)
+				{
+
+					InspValve_Close();
+										ExpValve_Open();
+					//HAL_DAC_SetValue(&hdac, DAC_CHANNEL_2,DAC_ALIGN_12B_R, _DAC_VAL0) ;
+					_MONITORING_TRANSMIT_PKT._R_PEEP = _Pressure_Val ;
+
+				}
+				else
+				{
+					InspValve_Close();
+					ExpValve_Close();
+					_PEEP_REACHED_FLAG = pdTRUE ;
+
+					//HAL_DAC_SetValue(&hdac, DAC_CHANNEL_2,DAC_ALIGN_12B_R, _DAC_VAL0) ;
+				}
+
+				break;
+			case NoComputeState:
+				break;
+			default:
+				break;
+
+		}
+	  }
+  /* USER CODE END CMVPC_Mode_Task */
+}
+
+/* USER CODE BEGIN Header_CMVVC_Mode_Task */
+/**
+* @brief Function implementing the CMVVC thread.
+* @param argument: Not used
+* @retval None
+*/
+/* USER CODE END Header_CMVVC_Mode_Task */
+void CMVVC_Mode_Task(void *argument)
+{
+  /* USER CODE BEGIN CMVVC_Mode_Task */
+  /* Infinite loop */
+	  for(;;)
+	  {
+		  switch (_CurrentComputationState) {
+
+		  case Compute_I_Wave:
+			  	/* Increment DAC untill _Total_Volume reaches _VT_Val */
+				if(_Total_Volume <= _VT_Val && _DAC_VAL0 !=0 )
+				{
+					InspValve_Open();
+					ExpValve_Close();
+					HAL_DAC_SetValue(&hdac, DAC_CHANNEL_1,DAC_ALIGN_12B_R, _DAC_VAL0) ;
+					HAL_DAC_SetValue(&hdac, DAC_CHANNEL_2,DAC_ALIGN_12B_R, _DAC_VAL0) ;
+					_DAC_VAL0++ ;
+					_MONITORING_TRANSMIT_PKT._R_VTI = _Total_Volume ;
+				}
+				else if(_Pressure_Val < _PEEP_Val)
+				{
+					InspValve_Close();
+					ExpValve_Close();
+					HAL_DAC_SetValue(&hdac, DAC_CHANNEL_2,DAC_ALIGN_12B_R, _DAC_VAL0) ;
+				}
+				else
+				{
+					InspValve_Close();
+					ExpValve_Open();
+					_DAC_VAL0 = 0 ;
+				}
+
+				break;
+			case Compute_E_Wave:
+				_DAC_VAL0 = 0 ;
+				if(_Pressure_Val < _PEEP_Val)
+				{
+					InspValve_Close();
+					ExpValve_Close();
+					HAL_DAC_SetValue(&hdac, DAC_CHANNEL_2,DAC_ALIGN_12B_R, _DAC_VAL0) ;
+					_MONITORING_TRANSMIT_PKT._R_VTE = _Total_Volume ;
+				}
+				else
+				{
+					InspValve_Close();
+					ExpValve_Open();
+					HAL_DAC_SetValue(&hdac, DAC_CHANNEL_2,DAC_ALIGN_12B_R, _DAC_VAL0) ;
+				}
+				break;
+			case NoComputeState:
+				break;
+			default:
+				break;
+
+		}
+	  }
+  /* USER CODE END CMVVC_Mode_Task */
+}
+
+/* USER CODE BEGIN Header_SIMVPC_Mode_Task */
+/**
+* @brief Function implementing the SIMVPC thread.
+* @param argument: Not used
+* @retval None
+*/
+/* USER CODE END Header_SIMVPC_Mode_Task */
+void SIMVPC_Mode_Task(void *argument)
+{
+  /* USER CODE BEGIN SIMVPC_Mode_Task */
+  /* Infinite loop */
+  for(;;)
+  {
+    osDelay(1);
+  }
+  /* USER CODE END SIMVPC_Mode_Task */
+}
+
+/* USER CODE BEGIN Header_SIMVVC_Mode_Task */
+/**
+* @brief Function implementing the SIMVVC thread.
+* @param argument: Not used
+* @retval None
+*/
+/* USER CODE END Header_SIMVVC_Mode_Task */
+void SIMVVC_Mode_Task(void *argument)
+{
+  /* USER CODE BEGIN SIMVVC_Mode_Task */
+  /* Infinite loop */
+  for(;;)
+  {
+    osDelay(1);
+  }
+  /* USER CODE END SIMVVC_Mode_Task */
+}
+
+/* USER CODE BEGIN Header_PS_V_Mode_Task */
+/**
+* @brief Function implementing the PS_V thread.
+* @param argument: Not used
+* @retval None
+*/
+/* USER CODE END Header_PS_V_Mode_Task */
+void PS_V_Mode_Task(void *argument)
+{
+  /* USER CODE BEGIN PS_V_Mode_Task */
+  /* Infinite loop */
+  for(;;)
+  {
+    osDelay(1);
+  }
+  /* USER CODE END PS_V_Mode_Task */
+}
+
+/* USER CODE BEGIN Header_cPAP_V_Mode_Task */
+/**
+* @brief Function implementing the cPAP_V thread.
+* @param argument: Not used
+* @retval None
+*/
+/* USER CODE END Header_cPAP_V_Mode_Task */
+void cPAP_V_Mode_Task(void *argument)
+{
+  /* USER CODE BEGIN cPAP_V_Mode_Task */
+  /* Infinite loop */
+  for(;;)
+  {
+    osDelay(1);
+  }
+  /* USER CODE END cPAP_V_Mode_Task */
+}
+
+/* USER CODE BEGIN Header_BiPAP_V_Mode_Task */
+/**
+* @brief Function implementing the BiPAP_V thread.
+* @param argument: Not used
+* @retval None
+*/
+/* USER CODE END Header_BiPAP_V_Mode_Task */
+void BiPAP_V_Mode_Task(void *argument)
+{
+  /* USER CODE BEGIN BiPAP_V_Mode_Task */
+  /* Infinite loop */
+  for(;;)
+  {
+    osDelay(1);
+  }
+  /* USER CODE END BiPAP_V_Mode_Task */
+}
+
+/* USER CODE BEGIN Header_APR_VC_Mode_Task */
+/**
+* @brief Function implementing the APR_VC thread.
+* @param argument: Not used
+* @retval None
+*/
+/* USER CODE END Header_APR_VC_Mode_Task */
+void APR_VC_Mode_Task(void *argument)
+{
+  /* USER CODE BEGIN APR_VC_Mode_Task */
+  /* Infinite loop */
+  for(;;)
+  {
+    osDelay(1);
+  }
+  /* USER CODE END APR_VC_Mode_Task */
+}
+
+/* USER CODE BEGIN Header_Debug_Task */
+/**
+* @brief Function implementing the Debug thread.
+* @param argument: Not used
+* @retval None
+*/
+/* USER CODE END Header_Debug_Task */
+void Debug_Task(void *argument)
+{
+  /* USER CODE BEGIN Debug_Task */
+   TickType_t xDelay = 1 ; // portTICK_PERIOD_MS
+  /* Infinite loop */
+  for(;;)
+  {
+		_CYCLIC_TRANSMIT_PKT._header          = 0x5052 ;
+		_CYCLIC_TRANSMIT_PKT._length          = sizeof(_CYCLIC_TRANSMIT_PKT) - 4 ;
+		_CYCLIC_TRANSMIT_PKT._Pressure_Val    = _Pressure_Val ;
+		_CYCLIC_TRANSMIT_PKT._Flow_Val        = _Flow_Val ;
+		_CYCLIC_TRANSMIT_PKT._Volume_Val      = _Volume_Val ;
+		_CYCLIC_TRANSMIT_PKT._CRC8            = chksum8(&_CYCLIC_TRANSMIT_PKT._Pressure_Val,_CYCLIC_TRANSMIT_PKT._length); ;
+
+		CDC_Transmit_FS((uint8_t*)&_CYCLIC_TRANSMIT_PKT,sizeof(_CYCLIC_TRANSMIT_PKT)) ;
+
+		if(TransmitFlag == 0)
+		{
+			HAL_UART_Transmit_IT(&huart3,(uint8_t*)&_CYCLIC_TRANSMIT_PKT,sizeof(_CYCLIC_TRANSMIT_PKT));
+			TransmitFlag = 1 ;
+		}
+		vTaskDelay( xDelay );
+  }
+  /* USER CODE END Debug_Task */
+}
+
+/* USER CODE BEGIN Header_UART_CMD_Handler_Task */
+/**
+* @brief Function implementing the UART_CMD_Handle thread.
+* @param argument: Not used
+* @retval None
+*/
+/* USER CODE END Header_UART_CMD_Handler_Task */
+void UART_CMD_Handler_Task(void *argument)
+{
+  /* USER CODE BEGIN UART_CMD_Handler_Task */
+   xSemaphoreTake(UART_RX_BufferHandle, portMAX_DELAY);
+   HAL_UART_Receive_IT(&huart3,(uint8_t*)UART_RX_BUF,sizeof(UART_RX_BUF));
+   uint8_t _RX_CRC8 = 0 ;
+  /* Infinite loop */
+  for(;;)
+  {
+	xSemaphoreTake(UART_RX_BufferHandle, portMAX_DELAY);
+
+	_RX_CRC8 = chksum8(&UART_RX_BUF[3],((SET_PARAM_CMD_PACKET*) (UART_RX_BUF))->_length);
+
+	if(_RX_CRC8 == ((SET_PARAM_CMD_PACKET*) (UART_RX_BUF))->_CRC8)
+	{
+		if((0x5052 == ((SET_PARAM_CMD_PACKET*) (UART_RX_BUF))->_header) && (0x01 == ((DATA_REQUEST_PACKET*) (UART_RX_BUF))->_data))
+		{
+			_CYCLIC_TRANSMIT_PKT._header          = 0x5052 ;
+			_CYCLIC_TRANSMIT_PKT._length          = sizeof(_CYCLIC_TRANSMIT_PKT)-4 ;
+			_CYCLIC_TRANSMIT_PKT._Pressure_Val    = _Pressure_Val ;
+			_CYCLIC_TRANSMIT_PKT._Flow_Val        = _Flow_Val ;
+			_CYCLIC_TRANSMIT_PKT._Volume_Val      = _Volume_Val ;
+			_CYCLIC_TRANSMIT_PKT._CRC8            = chksum8(&_CYCLIC_TRANSMIT_PKT._Pressure_Val,_CYCLIC_TRANSMIT_PKT._length); ;
+
+			CDC_Transmit_FS((uint8_t*)&_CYCLIC_TRANSMIT_PKT,sizeof(_CYCLIC_TRANSMIT_PKT)) ;
+
+			if(TransmitFlag == 0)
+			{
+				HAL_UART_Transmit_IT(&huart3,(uint8_t*)&_CYCLIC_TRANSMIT_PKT,sizeof(_CYCLIC_TRANSMIT_PKT));
+				TransmitFlag = 1 ;
+			}
+		}
+		else if((0x5052 == ((SET_PARAM_CMD_PACKET*) (UART_RX_BUF))->_header) && (0x02 == ((DATA_REQUEST_PACKET*) (UART_RX_BUF))->_data))
+		{
+			 CDC_Transmit_FS((uint8_t*)&_MONITORING_TRANSMIT_PKT,sizeof(_MONITORING_TRANSMIT_PKT)-1) ;
+			 if(TransmitFlag == 0)
+			 {
+				   HAL_UART_Transmit_IT(&huart3,(uint8_t*)&_MONITORING_TRANSMIT_PKT,sizeof(_MONITORING_TRANSMIT_PKT));
+				   TransmitFlag = 1 ;
+			 }
+		}
+		else
+		{
+			COMMAND_HANDLER((SET_PARAM_CMD_PACKET*) (UART_RX_BUF));
+		}
+	}
+    HAL_UART_Receive_IT(&huart3,(uint8_t*)UART_RX_BUF,sizeof(UART_RX_BUF));
+  }
+  /* USER CODE END UART_CMD_Handler_Task */
+}
+
+/* Private application code --------------------------------------------------*/
+/* USER CODE BEGIN Application */
+void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef* hadc)
+{
+	BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+	xSemaphoreGiveFromISR( ADC_BufferHandle, &xHigherPriorityTaskWoken );
+	_ADC_CHANNEL0[_ADC_SampleCount] = ADC_RESULT_BUF[0];
+	_ADC_CHANNEL1[_ADC_SampleCount] = ADC_RESULT_BUF[1];
+	_ADC_SampleCount++;
+	portEND_SWITCHING_ISR( xHigherPriorityTaskWoken );
+}
+
+
+void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
+{
+	BaseType_t xHigherPriorityTaskWoken;
+
+	xSemaphoreGiveFromISR(UART_RX_BufferHandle, &xHigherPriorityTaskWoken);
+
+	/* Pass the xHigherPriorityTaskWoken value into portEND_SWITCHING_ISR(). If
+	 xHigherPriorityTaskWoken was set to pdTRUE inside xSemaphoreGiveFromISR()
+	 then calling portEND_SWITCHING_ISR() will request a context switch. If
+	 xHigherPriorityTaskWoken is still pdFALSE then calling
+	 portEND_SWITCHING_ISR() will have no effect */
+	portEND_SWITCHING_ISR( xHigherPriorityTaskWoken );
+}
+
+
+void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
+{
+	TransmitFlag = 0 ;
+}
+
+
+
+void COMMAND_HANDLER(SET_PARAM_CMD_PACKET *RX_PARAM_CMD_PACKET)
+{
+	uint32_t CycleTime = 0 , I_Time = 0 , E_Time = 0 ,RT_Value = 0 ;
+
+	CycleTime = 60000/RX_PARAM_CMD_PACKET->_RR ;
+	I_Time = RX_PARAM_CMD_PACKET->_I ;
+	E_Time = RX_PARAM_CMD_PACKET->_E ;
+	RT_Value = RX_PARAM_CMD_PACKET->_RiseTime;
+	_PIP_Val = RX_PARAM_CMD_PACKET->_PIP;
+	_PEEP_Val = RX_PARAM_CMD_PACKET->_PEEP;
+	_VT_Val = RX_PARAM_CMD_PACKET->_VTI;
+	_Mode_Val = RX_PARAM_CMD_PACKET->_mode;
+	_PIO2_Val = RX_PARAM_CMD_PACKET->_FIO2;
+
+	if(_CurrentWaveFormState == NoWaveFormState)
+	{
+		/*Calculation for the Pulse Width */
+		I_Wave = (I_Time * (CycleTime/(I_Time+E_Time))) ;
+		E_Wave = (E_Time * (CycleTime/(I_Time+E_Time))) ;
+		RT_Value = RT_Value  ;
+		RTI_Wave = I_Wave - RT_Value ;
+
+		if(_Mode_Val == 0x01)
+		{
+			_RequestedMode = PCCMV ;
+			RTI_Wave = I_Wave - RT_Value ;
+			_CurrentWaveFormState = Generate_RT_Wave ;
+		}
+		else if(_Mode_Val == 0x02)
+		{
+			_RequestedMode = VCCMV ;
+			RTI_Wave = I_Wave ;
+			_CurrentWaveFormState = Generate_I_Wave ;
+		}
+
+		_MODE_DATA_SWITCH_FLAG = pdTRUE ;
+	}
+	else
+	{
+		/*Calculation for the Pulse Width */
+		_Req_I_Wave = (I_Time * (CycleTime/(I_Time+E_Time))) ;
+		_Req_E_Wave = (E_Time * (CycleTime/(I_Time+E_Time))) ;
+		RT_Value = RT_Value ;
+		_Req_RTI_Wave = _Req_I_Wave - RT_Value ;
+
+		if(_Mode_Val == 0x01)
+		{
+			_Req_RTI_Wave = _Req_I_Wave - RT_Value ;
+		}
+		else if(_Mode_Val == 0x02)
+		{
+			_Req_RTI_Wave = _Req_I_Wave ;
+		}
+
+		_MODE_DATA_SWITCH_FLAG = pdTRUE ;
+	}
+
+	if(_Mode_Val == DebugMode)
+	{
+		/*vTaskResume(DebugHandle);*/
+		vTaskSuspend(CMVPCHandle);
+		vTaskSuspend(CMVVCHandle);
+		_RequestedMode = NoMode ;
+	}
+	else if(_Mode_Val == PCCMV)
+	{
+		_RequestedMode = PCCMV ;
+	}
+	else if(_Mode_Val == VCCMV)
+	{
+		_RequestedMode = VCCMV ;
+	}
+	else
+	{
+		vTaskSuspend(DebugHandle);
+		vTaskSuspend(CMVPCHandle);
+		vTaskSuspend(CMVVCHandle);
+		vTaskSuspend(PulseGeneratorHandle);
+		_CurrentComputationState = NoWaveFormState ;
+		_RequestedMode = NoMode ;
+	}
+
+}
+
+void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart) {
+  if(huart->ErrorCode == HAL_UART_ERROR_ORE) {
+    __HAL_UART_FLUSH_DRREGISTER(huart);
+    __HAL_UART_CLEAR_OREFLAG(huart);
+    HAL_UART_Receive_IT(&huart3,(uint8_t*)UART_RX_BUF,sizeof(UART_RX_BUF));
+  }
+}
+
+/* USER CODE END Application */
+
+/************************ (C) COPYRIGHT STMicroelectronics *****END OF FILE****/

@@ -1,0 +1,2 @@
+controlsys.c:3:6:controlsys_Init	16	static
+controlsys.c:16:7:controlsys_Update	48	static

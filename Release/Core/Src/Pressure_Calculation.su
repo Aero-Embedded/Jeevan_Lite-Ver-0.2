@@ -1,0 +1,3 @@
+Pressure_Calculation.c:19:7:_CONVERT_KPAtoBar	0	static
+Pressure_Calculation.c:26:7:_CONVERT_dPAtoFlow	32	static
+Pressure_Calculation.c:45:7:_CONVERT_PRESStoCMH2O	8	static

@@ -1,0 +1,13 @@
+MAIN:
+
+while(1)
+{
+	BLOWER_ON();
+	HAL_DAC_SetValue(&hdac, DAC_CHANNEL_1,DAC_ALIGN_12B_R, 4000);
+	ExpValve_Open();
+	HAL_Delay(1000);
+        HAL_DAC_SetValue(&hdac, DAC_CHANNEL_1,DAC_ALIGN_12B_R, 0);
+	BLOWER_OFF();
+	ExpValve_Close();
+	HAL_Delay(2000);
+}

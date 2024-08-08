@@ -1,0 +1,4 @@
+Ventilator_Calc.c:30:10:getAvgMilliVot	8	static
+Ventilator_Calc.c:52:10:getAvgMilliVot_MovingAverage	12	static
+Ventilator_Calc.c:71:9:Calibration_Process	16	static
+Ventilator_Calc.c:94:9:chksum8	0	static
